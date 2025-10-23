@@ -10,6 +10,8 @@
 (define-constant ERR_NO_BET_FOUND (err u108))
 (define-constant ERR_ALREADY_CLAIMED (err u109))
 (define-constant ERR_INVALID_EVENT_ID (err u110))
+(define-constant ERR_EVENT_CANCELLED (err u111))
+(define-constant ERR_CANNOT_CANCEL_RESOLVED (err u112))
 (define-constant PROTOCOL_FEE_PERCENTAGE u3)
 
 (define-data-var next-event-id uint u1)
@@ -23,7 +25,8 @@
     outcome: (optional uint),
     total-pool: uint,
     resolved: bool,
-    outcome-count: uint
+    outcome-count: uint,
+    cancelled: bool
 })
 
 (define-map event-outcomes { event-id: uint, outcome: uint } {
@@ -95,7 +98,8 @@
             outcome: none,
             total-pool: u0,
             resolved: false,
-            outcome-count: outcome-count
+            outcome-count: outcome-count,
+            cancelled: false
         })
         
         (var-set next-event-id (+ event-id u1))
@@ -114,6 +118,7 @@
     )
         (asserts! (< current-block (get end-block event-data)) ERR_EVENT_ENDED)
         (asserts! (not (get resolved event-data)) ERR_EVENT_ALREADY_RESOLVED)
+        (asserts! (not (get cancelled event-data)) ERR_EVENT_CANCELLED)
         (asserts! (< outcome (get outcome-count event-data)) ERR_INVALID_OUTCOME)
         (asserts! (> bet-amount u0) ERR_INSUFFICIENT_FUNDS)
         (asserts! (is-none existing-bet) ERR_ALREADY_CLAIMED)
@@ -146,6 +151,7 @@
         (asserts! (is-eq tx-sender (get oracle event-data)) ERR_ORACLE_NOT_AUTHORIZED)
         (asserts! (>= current-block (get end-block event-data)) ERR_EVENT_NOT_ENDED)
         (asserts! (not (get resolved event-data)) ERR_EVENT_ALREADY_RESOLVED)
+        (asserts! (not (get cancelled event-data)) ERR_EVENT_CANCELLED)
         (asserts! (< winning-outcome (get outcome-count event-data)) ERR_INVALID_OUTCOME)
         
         (let (
@@ -173,6 +179,7 @@
         (winning-outcome (unwrap! (get outcome event-data) ERR_EVENT_NOT_ENDED))
     )
         (asserts! (get resolved event-data) ERR_EVENT_NOT_ENDED)
+        (asserts! (not (get cancelled event-data)) ERR_EVENT_CANCELLED)
         (asserts! (not (get claimed user-bet)) ERR_ALREADY_CLAIMED)
         (asserts! (is-eq outcome winning-outcome) ERR_INVALID_OUTCOME)
         
@@ -204,5 +211,44 @@
         (var-set protocol-fees u0)
         (as-contract (try! (stx-transfer? current-fees tx-sender CONTRACT_OWNER)))
         (ok current-fees)
+    )
+)
+
+(define-public (cancel-event (event-id uint))
+    (let (
+        (event-data (unwrap! (map-get? events event-id) ERR_EVENT_NOT_FOUND))
+        (caller-is-owner (is-eq tx-sender CONTRACT_OWNER))
+        (caller-is-oracle (is-eq tx-sender (get oracle event-data)))
+    )
+        (asserts! (or caller-is-owner caller-is-oracle) ERR_UNAUTHORIZED)
+        (asserts! (not (get resolved event-data)) ERR_CANNOT_CANCEL_RESOLVED)
+        (asserts! (not (get cancelled event-data)) ERR_EVENT_CANCELLED)
+        
+        (map-set events event-id 
+            (merge event-data { cancelled: true })
+        )
+        
+        (ok true)
+    )
+)
+
+(define-public (claim-refund (event-id uint) (outcome uint))
+    (let (
+        (event-data (unwrap! (map-get? events event-id) ERR_EVENT_NOT_FOUND))
+        (user-bet (unwrap! (map-get? user-bets { user: tx-sender, event-id: event-id, outcome: outcome }) ERR_NO_BET_FOUND))
+    )
+        (asserts! (get cancelled event-data) ERR_EVENT_NOT_FOUND)
+        (asserts! (not (get claimed user-bet)) ERR_ALREADY_CLAIMED)
+        
+        (let (
+            (refund-amount (get amount user-bet))
+        )
+            (map-set user-bets { user: tx-sender, event-id: event-id, outcome: outcome }
+                (merge user-bet { claimed: true })
+            )
+            
+            (as-contract (try! (stx-transfer? refund-amount tx-sender tx-sender)))
+            (ok refund-amount)
+        )
     )
 )
